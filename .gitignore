@@ -1,3 +1,4 @@
+attention_maps/
 .hydra/
 output/
 ckpt/

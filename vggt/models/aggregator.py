@@ -236,42 +236,61 @@ class Aggregator(nn.Module):
                 cv2.imwrite(fpath, overlayed_img)
 
         elif attn_type == 'global':
-            # We want to see how the camera token of the FIRST frame (query_idx=0)
-            # attends to the patch tokens of ALL frames.
-            # The full attention map is (B, S*P, S*P)
-            # The query token is at index 0.
-            global_camera_attn = attn_map_avg[:, 0, :] # Shape: (B, S*P)
+            # We want to see how the camera token of *every* frame (src)
+            # attends to the patch tokens of *every* frame (tgt).
+            # This will be visualized as an S x S grid.
+            global_attn = attn_map_avg # Shape: (B, S*P, S*P)
             
             for b in range(B):
-                if b > 0: continue
-                
-                fig, axes = plt.subplots(1, S, figsize=(S * 4, 4), squeeze=False)
-                fig.suptitle(f'Global Attention from Frame 0 Camera - Layer {layer_idx:02d}', fontsize=16)
+                if b > 0: continue # Only visualize for the first item in the batch
 
-                for frame_idx in range(S):
-                    # Calculate start and end indices for the patch tokens of the current frame
-                    start = frame_idx * P + self.patch_start_idx
-                    end = start + num_patch_tokens
-                    
-                    # Slice the attention weights for the current frame's patches
-                    attn_slice = global_camera_attn[b, start:end].reshape(patch_h, patch_w)
-                    
-                    original_img_tensor = images[b, frame_idx]
-                    original_img_np = (original_img_tensor.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+                # Create an S x S grid of subplots
+                fig, axes = plt.subplots(S, S, figsize=(S * 4, S * 4), squeeze=False)
+                fig.suptitle(f'Global Attention - Layer {layer_idx:02d}', fontsize=16)
 
-                    attn_heatmap_resized = cv2.resize(attn_slice, (original_img_np.shape[1], original_img_np.shape[0]))
-                    attn_heatmap_norm = (attn_heatmap_resized - attn_heatmap_resized.min()) / (attn_heatmap_resized.max() - attn_heatmap_resized.min() + 1e-8)
-                    attn_heatmap_colored = (plt.cm.viridis(attn_heatmap_norm)[:, :, :3] * 255).astype(np.uint8)
+                for src_frame_idx in range(S):
+                    # The query token is the camera token of the source frame.
+                    # Its index in the flattened S*P sequence is src_frame_idx * P.
+                    query_token_idx = src_frame_idx * P
                     
-                    overlayed_img = cv2.addWeighted(original_img_np, 0.2, attn_heatmap_colored, 0.8, 0)
-                    
-                    ax = axes[0, frame_idx]
-                    ax.imshow(cv2.cvtColor(overlayed_img, cv2.COLOR_BGR2RGB))
-                    ax.set_title(f'To Frame {frame_idx}')
-                    ax.axis('off')
-                
-                plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-                fpath = os.path.join(output_dir, "global", f"layer_{layer_idx:02d}_overlay.png")
+                    for tgt_frame_idx in range(S):
+                        # Calculate start and end indices for the patch tokens of the target frame
+                        start = tgt_frame_idx * P + self.patch_start_idx
+                        end = start + num_patch_tokens
+                        
+                        # Slice the attention weights from the source camera to the target patches
+                        # global_attn has shape (B, S*P, S*P)
+                        attn_slice = global_attn[b, query_token_idx, start:end].reshape(patch_h, patch_w)
+                        
+                        # Get the original image for overlaying
+                        original_img_tensor = images[b, tgt_frame_idx]
+                        original_img_np = (original_img_tensor.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+                        original_img_bgr = cv2.cvtColor(original_img_np, cv2.COLOR_RGB2BGR)
+
+                        # Resize and color the heatmap
+                        attn_heatmap_resized = cv2.resize(attn_slice, (original_img_np.shape[1], original_img_np.shape[0]))
+                        attn_heatmap_norm = (attn_heatmap_resized - attn_heatmap_resized.min()) / (attn_heatmap_resized.max() - attn_heatmap_resized.min() + 1e-8)
+                        attn_heatmap_colored = (plt.cm.viridis(attn_heatmap_norm)[:, :, :3] * 255).astype(np.uint8)
+                        attn_heatmap_bgr = cv2.cvtColor(attn_heatmap_colored, cv2.COLOR_RGB2BGR)
+                        
+                        # Overlay heatmap on the original image
+                        overlayed_img = cv2.addWeighted(original_img_bgr, 0.2, attn_heatmap_bgr, 0.8, 0)
+                        
+                        # Plot on the corresponding subplot
+                        ax = axes[src_frame_idx, tgt_frame_idx]
+                        ax.imshow(cv2.cvtColor(overlayed_img, cv2.COLOR_BGR2RGB))
+                        
+                        # Set titles for rows and columns
+                        if tgt_frame_idx == 0:
+                            ax.set_ylabel(f'From Frame {src_frame_idx}', fontsize=12)
+                        if src_frame_idx == 0:
+                            ax.set_title(f'To Frame {tgt_frame_idx}', fontsize=12)
+                            
+                        ax.set_xticks([])
+                        ax.set_yticks([])
+
+                plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+                fpath = os.path.join(output_dir, "global", f"layer_{layer_idx:02d}_grid_overlay.png")
                 plt.savefig(fpath)
                 plt.close(fig)
     # --- MODIFICATION ENDS HERE ---

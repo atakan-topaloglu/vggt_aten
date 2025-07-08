@@ -86,7 +86,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_dir", 
         type=str, 
-        default="attention_maps", 
+        default="attention_maps/attn_maps", 
         help="Directory where the attention map images will be saved."
     )
     parser.add_argument(

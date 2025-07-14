@@ -50,7 +50,7 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.rope = rope
 
-    def forward(self, x: Tensor, pos=None, visualize: bool = False) -> Union[Tensor, Tuple[Tensor, Tensor]]:
+    def forward(self, x: Tensor, pos=None, visualize: bool = False, vis_source_cam_token_only: bool = False, source_frame_idx: int = 0, num_patches_per_frame: int = 0) -> Union[Tensor, Tuple[Tensor, Tensor]]:
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
@@ -60,39 +60,55 @@ class Attention(nn.Module):
             q = self.rope(q, pos)
             k = self.rope(k, pos)
 
-        # To get attention maps, we must use the non-fused path.
         use_fused_attn = self.fused_attn and not visualize
 
         attn_map = None
         if use_fused_attn:
-            # This path is faster but does not expose the attention matrix.
             x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p if self.training else 0.0)
+        elif vis_source_cam_token_only:
+            # Memory-efficient path for visualizing specific attention
+            # Query is only the camera token from the source frame
+            # Key/Value are all tokens from all frames
+            q_cam_token = q[:, :, source_frame_idx * num_patches_per_frame, :].unsqueeze(2) # Shape: (B, num_heads, 1, head_dim)
+
+            attn = (q_cam_token * self.scale) @ k.transpose(-2, -1) # Shape: (B, num_heads, 1, S*P)
+            attn = attn.softmax(dim=-1)
+            attn_map = attn # Save for visualization
+            attn = self.attn_drop(attn)
+            x = attn @ v # Shape: (B, num_heads, 1, head_dim)
+            # Since we only computed attention for one token, we need to update only that token's representation.
+            # This is a simplification; a full implementation would scatter this back.
+            # For visualization, we only need the attn_map, so the output 'x' is less critical.
+            # We'll return a placeholder 'x' and the real attention map.
+            # The aggregator will use the attention map and discard this 'x'.
+            # A more robust implementation would involve scattering the result, but this is sufficient for visualization.
+            return x, attn_map
+
         else:
+            # Original, memory-intensive visualization path
             q = q * self.scale
             attn = q @ k.transpose(-2, -1)
             attn = attn.softmax(dim=-1)
             if visualize:
-                attn_map = attn  # Save before dropout for visualization
+                attn_map = attn
             attn = self.attn_drop(attn)
             x = attn @ v
 
-        x = x.transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
+        if not vis_source_cam_token_only:
+            x = x.transpose(1, 2).reshape(B, N, C)
+            x = self.proj(x)
+            x = self.proj_drop(x)
 
         if visualize:
             if use_fused_attn:
-                raise NotImplementedError(
-                    "Cannot visualize attention with fused attention. "
-                    "Please set fused_attn=False in the model config if you need to visualize during training."
-                )
+                raise NotImplementedError("Cannot visualize with fused attention.")
             return x, attn_map
         return x
 
 
 class MemEffAttention(Attention):
-    def forward(self, x: Tensor, attn_bias=None, pos=None) -> Tensor:
-        # Visualization is not supported for MemEffAttention in this implementation
+    def forward(self, x: Tensor, attn_bias=None, pos=None, **kwargs) -> Tensor:
         if attn_bias is not None:
             warnings.warn("MemEffAttention with attn_bias does not support visualization.")
-        return super().forward(x, pos=pos, visualize=False)
+        # Pass kwargs to the parent's forward method
+        return super().forward(x, pos=pos, visualize=False, **kwargs)

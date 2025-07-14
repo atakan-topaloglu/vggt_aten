@@ -20,9 +20,7 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         self.depth_head = DPTHead(dim_in=2 * embed_dim, output_dim=2, activation="exp", conf_activation="expp1")
         self.track_head = TrackHead(dim_in=2 * embed_dim, patch_size=patch_size)
 
-    # --- MODIFICATION STARTS HERE ---
-    def forward(self, images: torch.Tensor, query_points: torch.Tensor = None, visualize_attn_maps: bool = False, visualize_output_dir: str = "attention_maps"):
-    # --- MODIFICATION ENDS HERE ---
+    def forward(self, images: torch.Tensor, query_points: torch.Tensor = None, visualize_attn_maps: bool = False, visualize_output_dir: str = "attention_maps", vis_target_layer: int = 20, vis_source_frame: int = 0):
         """
         Forward pass of the VGGT model.
 
@@ -31,6 +29,8 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
             query_points (torch.Tensor, optional): Query points for tracking.
             visualize_attn_maps (bool, optional): If True, save attention maps to disk. Default: False.
             visualize_output_dir (str, optional): Directory to save attention maps. Default: "attention_maps".
+            vis_target_layer (int, optional): The specific global layer to visualize. Default: 20.
+            vis_source_frame (int, optional): The source frame for visualization. Default: 0.
 
         Returns:
             dict: A dictionary containing model predictions.
@@ -41,13 +41,13 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         if query_points is not None and len(query_points.shape) == 2:
             query_points = query_points.unsqueeze(0)
 
-        # --- MODIFICATION STARTS HERE ---
         aggregated_tokens_list, patch_start_idx = self.aggregator(
             images,
             visualize_attn_maps=visualize_attn_maps,
-            visualize_output_dir=visualize_output_dir
+            visualize_output_dir=visualize_output_dir,
+            vis_target_layer=vis_target_layer,
+            vis_source_frame=vis_source_frame,
         )
-        # --- MODIFICATION ENDS HERE ---
 
         predictions = {}
 

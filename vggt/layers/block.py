@@ -74,7 +74,7 @@ class Block(nn.Module):
 
         self.sample_drop_ratio = drop_path
 
-    def forward(self, x: Tensor, pos=None, visualize: bool = False):
+    def forward(self, x: Tensor, pos=None, visualize: bool = False, **kwargs):
         if visualize and self.training:
             warnings.warn("Attention visualization is not supported during training. Disabling.")
             visualize = False
@@ -85,12 +85,22 @@ class Block(nn.Module):
             x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
             return x
         else:
-            # Visualization logic (for inference only)
-            # No drop path during visualization
-            attn_output, attn_map = self.attn(self.norm1(x), pos=pos, visualize=True)
-            x = x + self.ls1(attn_output)
-            x = x + self.ls2(self.mlp(self.norm2(x)))
-            return x, attn_map
+            # Visualization logic
+            # Check for the special memory-saving visualization case
+            if kwargs.get("vis_source_cam_token_only", False):
+                # In this special case, we only care about the attention map.
+                # The attention output is for a single token and cannot be used for the residual connection.
+                # We pass the kwargs to the attention layer to trigger the efficient path.
+                _, attn_map = self.attn(self.norm1(x), pos=pos, visualize=True, **kwargs)
+                # Return the original input `x` as a placeholder for the token output, and the desired map.
+                # The aggregator will use the map and discard the token output for this block.
+                return x, attn_map
+            else:
+                # Original visualization logic for full attention matrix
+                attn_output, attn_map = self.attn(self.norm1(x), pos=pos, visualize=True, **kwargs)
+                x = x + self.ls1(attn_output)
+                x = x + self.ls2(self.mlp(self.norm2(x)))
+                return x, attn_map
 
 
 def drop_add_residual_stochastic_depth(
@@ -231,9 +241,9 @@ class NestedTensorBlock(Block):
             x = x + ffn_residual_func(x)
             return attn_bias.split(x)
 
-    def forward(self, x_or_x_list):
+    def forward(self, x_or_x_list, **kwargs):
         if isinstance(x_or_x_list, Tensor):
-            return super().forward(x_or_x_list)
+            return super().forward(x_or_x_list, **kwargs)
         elif isinstance(x_or_x_list, list):
             if not XFORMERS_AVAILABLE:
                 raise AssertionError("xFormers is required for using nested tensors")

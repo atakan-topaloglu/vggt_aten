@@ -24,7 +24,6 @@ _RESNET_STD = [0.229, 0.224, 0.225]
 
 
 class Aggregator(nn.Module):
-    # ... (keep __init__ and __build_patch_embed__ as they are) ...
     def __init__(
         self,
         img_size=518,
@@ -142,7 +141,7 @@ class Aggregator(nn.Module):
             if hasattr(self.patch_embed, "mask_token"):
                 self.patch_embed.mask_token.requires_grad_(False)
 
-    def forward(self, images: torch.Tensor, visualize_attn_maps: bool = False, visualize_output_dir: str = "attention_maps") -> Tuple[List[torch.Tensor], int]:
+    def forward(self, images: torch.Tensor, visualize_attn_maps: bool = False, visualize_output_dir: str = "attention_maps", vis_target_layer: int = 20, vis_source_frame: int = 0) -> Tuple[List[torch.Tensor], int]:
         B, S, C_in, H, W = images.shape
         if C_in != 3:
             raise ValueError(f"Expected 3 input channels, got {C_in}")
@@ -154,8 +153,6 @@ class Aggregator(nn.Module):
                 warnings.warn("Attention map visualization is disabled during training.")
                 visualize_attn_maps = False
             else:
-                print(f"Visualization of attention maps enabled. Saving to '{visualize_output_dir}'.")
-                os.makedirs(os.path.join(visualize_output_dir, "frame"), exist_ok=True)
                 os.makedirs(os.path.join(visualize_output_dir, "global"), exist_ok=True)
 
         images_normalized = (images - self._resnet_mean) / self._resnet_std
@@ -186,11 +183,16 @@ class Aggregator(nn.Module):
             for attn_type in self.aa_order:
                 if attn_type == "frame":
                     tokens, frame_idx, frame_intermediates = self._process_frame_attention(
-                        tokens, B, S, P, C, frame_idx, pos=pos, visualize=visualize_attn_maps, output_dir=visualize_output_dir, images=original_images_for_viz
+                        tokens, B, S, P, C, frame_idx, pos=pos
                     )
                 elif attn_type == "global":
+                    should_visualize_this_layer = visualize_attn_maps and (global_idx == vis_target_layer)
                     tokens, global_idx, global_intermediates = self._process_global_attention(
-                        tokens, B, S, P, C, global_idx, pos=pos, visualize=visualize_attn_maps, output_dir=visualize_output_dir, images=original_images_for_viz
+                        tokens, B, S, P, C, global_idx, pos=pos,
+                        visualize=should_visualize_this_layer,
+                        output_dir=visualize_output_dir,
+                        images=original_images_for_viz,
+                        source_frame_idx=vis_source_frame
                     )
                 else:
                     raise ValueError(f"Unknown attention type: {attn_type}")
@@ -202,119 +204,71 @@ class Aggregator(nn.Module):
         del concat_inter, frame_intermediates, global_intermediates
         return output_list, self.patch_start_idx
 
-    # --- MODIFICATION STARTS HERE ---
-    def _save_attention_map(self, attn_map: torch.Tensor, attn_type: str, layer_idx: int, B: int, S: int, P: int, output_dir: str, images: torch.Tensor):
-        attn_map_avg = attn_map.mean(dim=1).detach().cpu().numpy()
-        
+    def _save_attention_map(self, attn_map: torch.Tensor, layer_idx: int, B: int, S: int, P: int, output_dir: str, images: torch.Tensor, source_frame_idx: int):
+        # attn_map shape is (B, num_heads, 1, S*P) due to our optimization
+        attn_map_avg = attn_map.mean(dim=1).squeeze(1).detach().cpu().numpy() # Shape: (B, S*P)
+
         patch_h = images.shape[-2] // self.patch_size
         patch_w = images.shape[-1] // self.patch_size
         num_patch_tokens = patch_h * patch_w
 
-        if attn_type == 'frame':
-            # Attention from camera token (idx 0) to patch tokens
-            camera_token_attn = attn_map_avg[:, 0, self.patch_start_idx:]
-            camera_token_attn = camera_token_attn.reshape(B * S, patch_h, patch_w)
-            
-            for i in range(B * S):
-                batch_idx, frame_in_seq_idx = i // S, i % S
-                if batch_idx > 0: continue
+        for b in range(B):
+            # Create a single row of S subplots
+            fig, axes = plt.subplots(1, S, figsize=(S * 4, 4), squeeze=False)
+            fig.suptitle(f'Global Attention from Frame {source_frame_idx} - Layer {layer_idx:02d}', fontsize=16)
 
-                original_img_tensor = images[batch_idx, frame_in_seq_idx]
+            for tgt_frame_idx in range(S):
+                # Calculate start and end indices for the patch tokens of the target frame
+                start = tgt_frame_idx * P + self.patch_start_idx
+                end = start + num_patch_tokens
+
+                # Slice the attention weights from the source camera to the target patches
+                attn_slice = attn_map_avg[b, start:end].reshape(patch_h, patch_w)
+
+                # Get the original image for overlaying
+                original_img_tensor = images[b, tgt_frame_idx]
                 original_img_np = (original_img_tensor.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
                 original_img_bgr = cv2.cvtColor(original_img_np, cv2.COLOR_RGB2BGR)
 
-                attn_heatmap = camera_token_attn[i]
-                attn_heatmap_resized = cv2.resize(attn_heatmap, (original_img_np.shape[1], original_img_np.shape[0]))
-                
+                # Resize and color the heatmap
+                attn_heatmap_resized = cv2.resize(attn_slice, (original_img_np.shape[1], original_img_np.shape[0]))
                 attn_heatmap_norm = (attn_heatmap_resized - attn_heatmap_resized.min()) / (attn_heatmap_resized.max() - attn_heatmap_resized.min() + 1e-8)
-                attn_heatmap_colored = (plt.cm.viridis(attn_heatmap_norm)[:, :, :3] * 255).astype(np.uint8)
+                # --- MODIFICATION IS HERE ---
+                attn_heatmap_colored = (plt.cm.plasma(attn_heatmap_norm)[:, :, :3] * 255).astype(np.uint8)
                 attn_heatmap_bgr = cv2.cvtColor(attn_heatmap_colored, cv2.COLOR_RGB2BGR)
 
+                # Overlay heatmap on the original image
                 overlayed_img = cv2.addWeighted(original_img_bgr, 0.2, attn_heatmap_bgr, 0.8, 0)
-                
-                fpath = os.path.join(output_dir, "frame", f"layer_{layer_idx:02d}_frame_{frame_in_seq_idx:02d}_overlay.png")
-                cv2.imwrite(fpath, overlayed_img)
 
-        elif attn_type == 'global':
-            # We want to see how the camera token of *every* frame (src)
-            # attends to the patch tokens of *every* frame (tgt).
-            # This will be visualized as an S x S grid.
-            global_attn = attn_map_avg # Shape: (B, S*P, S*P)
-            
-            for b in range(B):
-                if b > 0: continue # Only visualize for the first item in the batch
+                # Plot on the corresponding subplot
+                ax = axes[0, tgt_frame_idx]
+                ax.imshow(cv2.cvtColor(overlayed_img, cv2.COLOR_BGR2RGB))
+                ax.set_title(f'To Frame {tgt_frame_idx}', fontsize=12)
+                ax.set_xticks([])
+                ax.set_yticks([])
 
-                # Create an S x S grid of subplots
-                fig, axes = plt.subplots(S, S, figsize=(S * 4, S * 4), squeeze=False)
-                fig.suptitle(f'Global Attention - Layer {layer_idx:02d}', fontsize=16)
+            plt.tight_layout(rect=[0, 0, 1, 0.95])
+            fpath = os.path.join(output_dir, "global", f"layer_{layer_idx:02d}_from_frame_{source_frame_idx}.png")
+            plt.savefig(fpath)
+            plt.close(fig)
+            print(f"Saved attention map to {fpath}")
 
-                for src_frame_idx in range(S):
-                    # The query token is the camera token of the source frame.
-                    # Its index in the flattened S*P sequence is src_frame_idx * P.
-                    query_token_idx = src_frame_idx * P
-                    
-                    for tgt_frame_idx in range(S):
-                        # Calculate start and end indices for the patch tokens of the target frame
-                        start = tgt_frame_idx * P + self.patch_start_idx
-                        end = start + num_patch_tokens
-                        
-                        # Slice the attention weights from the source camera to the target patches
-                        # global_attn has shape (B, S*P, S*P)
-                        attn_slice = global_attn[b, query_token_idx, start:end].reshape(patch_h, patch_w)
-                        
-                        # Get the original image for overlaying
-                        original_img_tensor = images[b, tgt_frame_idx]
-                        original_img_np = (original_img_tensor.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-                        original_img_bgr = cv2.cvtColor(original_img_np, cv2.COLOR_RGB2BGR)
 
-                        # Resize and color the heatmap
-                        attn_heatmap_resized = cv2.resize(attn_slice, (original_img_np.shape[1], original_img_np.shape[0]))
-                        attn_heatmap_norm = (attn_heatmap_resized - attn_heatmap_resized.min()) / (attn_heatmap_resized.max() - attn_heatmap_resized.min() + 1e-8)
-                        attn_heatmap_colored = (plt.cm.viridis(attn_heatmap_norm)[:, :, :3] * 255).astype(np.uint8)
-                        attn_heatmap_bgr = cv2.cvtColor(attn_heatmap_colored, cv2.COLOR_RGB2BGR)
-                        
-                        # Overlay heatmap on the original image
-                        overlayed_img = cv2.addWeighted(original_img_bgr, 0.2, attn_heatmap_bgr, 0.8, 0)
-                        
-                        # Plot on the corresponding subplot
-                        ax = axes[src_frame_idx, tgt_frame_idx]
-                        ax.imshow(cv2.cvtColor(overlayed_img, cv2.COLOR_BGR2RGB))
-                        
-                        # Set titles for rows and columns
-                        if tgt_frame_idx == 0:
-                            ax.set_ylabel(f'From Frame {src_frame_idx}', fontsize=12)
-                        if src_frame_idx == 0:
-                            ax.set_title(f'To Frame {tgt_frame_idx}', fontsize=12)
-                            
-                        ax.set_xticks([])
-                        ax.set_yticks([])
-
-                plt.tight_layout(rect=[0, 0.03, 1, 0.97])
-                fpath = os.path.join(output_dir, "global", f"layer_{layer_idx:02d}_grid_overlay.png")
-                plt.savefig(fpath)
-                plt.close(fig)
-    # --- MODIFICATION ENDS HERE ---
-
-    def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None, visualize=False, output_dir="attention_maps", images=None):
+    def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None):
         if tokens.shape != (B * S, P, C):
             tokens = tokens.view(B, S, P, C).view(B * S, P, C)
         if pos is not None and pos.shape != (B * S, P, 2):
             pos = pos.view(B, S, P, 2).view(B * S, P, 2)
-        
+
         intermediates = []
         for _ in range(self.aa_block_size):
             block_input = tokens
-            if visualize:
-                tokens, attn_map = self.frame_blocks[frame_idx](block_input, pos=pos, visualize=True)
-                self._save_attention_map(attn_map, 'frame', frame_idx, B, S, P, output_dir, images)
-            else:
-                tokens = self.frame_blocks[frame_idx](block_input, pos=pos)
-            
+            tokens = self.frame_blocks[frame_idx](block_input, pos=pos)
             frame_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
         return tokens, frame_idx, intermediates
 
-    def _process_global_attention(self, tokens, B, S, P, C, global_idx, pos=None, visualize=False, output_dir="attention_maps", images=None):
+    def _process_global_attention(self, tokens, B, S, P, C, global_idx, pos=None, visualize=False, output_dir=None, images=None, source_frame_idx=0):
         if tokens.shape != (B, S * P, C):
             tokens = tokens.view(B, S, P, C).view(B, S * P, C)
         if pos is not None and pos.shape != (B, S * P, 2):
@@ -324,8 +278,15 @@ class Aggregator(nn.Module):
         for _ in range(self.aa_block_size):
             block_input = tokens
             if visualize:
-                tokens, attn_map = self.global_blocks[global_idx](block_input, pos=pos, visualize=True)
-                self._save_attention_map(attn_map, 'global', global_idx, B, S, P, output_dir, images)
+                tokens, attn_map = self.global_blocks[global_idx](
+                    block_input,
+                    pos=pos,
+                    visualize=True,
+                    vis_source_cam_token_only=True,
+                    source_frame_idx=source_frame_idx,
+                    num_patches_per_frame=P
+                )
+                self._save_attention_map(attn_map, global_idx, B, S, P, output_dir, images, source_frame_idx)
             else:
                 tokens = self.global_blocks[global_idx](block_input, pos=pos)
 

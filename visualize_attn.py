@@ -8,6 +8,7 @@ import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 import math
+import cv2
 
 from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images
@@ -17,6 +18,46 @@ warnings.filterwarnings("ignore", message="xFormers is not available")
 warnings.filterwarnings("ignore", message="UserWarning: The given NumPy array is not writable")
 warnings.filterwarnings("ignore", "FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated")
 
+def save_average_attention_map(avg_attn_map: np.ndarray, B: int, S: int, P: int, patch_size: int, output_dir: str, images: torch.Tensor, source_frame_idx: int):
+    """
+    Saves the average attention map as a visual grid.
+    """
+    patch_h = images.shape[-2] // patch_size
+    patch_w = images.shape[-1] // patch_size
+    num_patch_tokens = patch_h * patch_w
+    patch_start_idx = P - num_patch_tokens
+
+    for b in range(B):
+        fig, axes = plt.subplots(1, S, figsize=(S * 4, 4), squeeze=False)
+        fig.suptitle(f'Average Global Attention from Frame {source_frame_idx} (All Layers)', fontsize=16)
+
+        for tgt_frame_idx in range(S):
+            start = tgt_frame_idx * P + patch_start_idx
+            end = start + num_patch_tokens
+            attn_slice = avg_attn_map[b, start:end].reshape(patch_h, patch_w)
+
+            original_img_tensor = images[b, tgt_frame_idx]
+            original_img_np = (original_img_tensor.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            original_img_bgr = cv2.cvtColor(original_img_np, cv2.COLOR_RGB2BGR)
+
+            attn_heatmap_resized = cv2.resize(attn_slice, (original_img_np.shape[1], original_img_np.shape[0]))
+            attn_heatmap_norm = (attn_heatmap_resized - attn_heatmap_resized.min()) / (attn_heatmap_resized.max() - attn_heatmap_resized.min() + 1e-8)
+            attn_heatmap_colored = (plt.cm.plasma(attn_heatmap_norm)[:, :, :3] * 255).astype(np.uint8)
+            attn_heatmap_bgr = cv2.cvtColor(attn_heatmap_colored, cv2.COLOR_RGB2BGR)
+
+            overlayed_img = cv2.addWeighted(original_img_bgr, 0.2, attn_heatmap_bgr, 0.8, 0)
+
+            ax = axes[0, tgt_frame_idx]
+            ax.imshow(cv2.cvtColor(overlayed_img, cv2.COLOR_BGR2RGB))
+            ax.set_title(f'To Frame {tgt_frame_idx}', fontsize=12)
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        fpath = os.path.join(output_dir, "global", f"AVERAGE_from_frame_{source_frame_idx}.png")
+        plt.savefig(fpath)
+        plt.close(fig)
+        print(f"\nSaved AVERAGE attention map to {fpath}")
 
 def main(args):
     """

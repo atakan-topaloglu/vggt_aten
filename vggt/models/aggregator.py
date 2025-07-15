@@ -11,6 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import cv2 # Import OpenCV
 import warnings
+import math
 
 from vggt.layers import PatchEmbed
 from vggt.layers.block import Block
@@ -214,38 +215,44 @@ class Aggregator(nn.Module):
 
         for b in range(B):
             # Create a single row of S subplots
-            fig, axes = plt.subplots(1, S, figsize=(S * 4, 4), squeeze=False)
+            # Calculate grid dimensions to be as square as possible
+            num_cols = int(math.ceil(math.sqrt(S)))
+            num_rows = int(math.ceil(S / num_cols))
+
+            fig, axes = plt.subplots(num_rows, num_cols, figsize=(num_cols * 4, num_rows * 4), squeeze=False)
             fig.suptitle(f'Global Attention from Frame {source_frame_idx} - Layer {layer_idx:02d}', fontsize=16)
 
-            for tgt_frame_idx in range(S):
-                # Calculate start and end indices for the patch tokens of the target frame
-                start = tgt_frame_idx * P + self.patch_start_idx
-                end = start + num_patch_tokens
+            for i in range(num_rows * num_cols):
+                row = i // num_cols
+                col = i % num_cols
+                ax = axes[row, col]
 
                 # Slice the attention weights from the source camera to the target patches
-                attn_slice = attn_map_avg[b, start:end].reshape(patch_h, patch_w)
+                if i < S:
+                    tgt_frame_idx = i
+                    # Calculate start and end indices for the patch tokens of the target frame
+                    start = tgt_frame_idx * P + self.patch_start_idx
+                    end = start + num_patch_tokens
 
                 # Get the original image for overlaying
-                original_img_tensor = images[b, tgt_frame_idx]
-                original_img_np = (original_img_tensor.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-                original_img_bgr = cv2.cvtColor(original_img_np, cv2.COLOR_RGB2BGR)
+                    attn_slice = attn_map_avg[b, start:end].reshape(patch_h, patch_w)
 
                 # Resize and color the heatmap
-                attn_heatmap_resized = cv2.resize(attn_slice, (original_img_np.shape[1], original_img_np.shape[0]))
-                attn_heatmap_norm = (attn_heatmap_resized - attn_heatmap_resized.min()) / (attn_heatmap_resized.max() - attn_heatmap_resized.min() + 1e-8)
-                # --- MODIFICATION IS HERE ---
-                attn_heatmap_colored = (plt.cm.plasma(attn_heatmap_norm)[:, :, :3] * 255).astype(np.uint8)
-                attn_heatmap_bgr = cv2.cvtColor(attn_heatmap_colored, cv2.COLOR_RGB2BGR)
+                    original_img_tensor = images[b, tgt_frame_idx]
+                    original_img_np = (original_img_tensor.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+                    original_img_bgr = cv2.cvtColor(original_img_np, cv2.COLOR_RGB2BGR)
 
                 # Overlay heatmap on the original image
-                overlayed_img = cv2.addWeighted(original_img_bgr, 0.2, attn_heatmap_bgr, 0.8, 0)
+                    attn_heatmap_resized = cv2.resize(attn_slice, (original_img_np.shape[1], original_img_np.shape[0]))
+                    attn_heatmap_norm = (attn_heatmap_resized - attn_heatmap_resized.min()) / (attn_heatmap_resized.max() - attn_heatmap_resized.min() + 1e-8)
+                    attn_heatmap_colored = (plt.cm.plasma(attn_heatmap_norm)[:, :, :3] * 255).astype(np.uint8)
+                    attn_heatmap_bgr = cv2.cvtColor(attn_heatmap_colored, cv2.COLOR_RGB2BGR)
 
-                # Plot on the corresponding subplot
-                ax = axes[0, tgt_frame_idx]
-                ax.imshow(cv2.cvtColor(overlayed_img, cv2.COLOR_BGR2RGB))
-                ax.set_title(f'To Frame {tgt_frame_idx}', fontsize=12)
-                ax.set_xticks([])
-                ax.set_yticks([])
+                    overlayed_img = cv2.addWeighted(original_img_bgr, 0.2, attn_heatmap_bgr, 0.8, 0)
+                    ax.imshow(cv2.cvtColor(overlayed_img, cv2.COLOR_BGR2RGB))
+                    ax.set_title(f'To Frame {tgt_frame_idx}', fontsize=10)
+                
+                ax.axis('off')
 
             plt.tight_layout(rect=[0, 0, 1, 0.95])
             fpath = os.path.join(output_dir, "global", f"layer_{layer_idx:02d}_from_frame_{source_frame_idx}.png")

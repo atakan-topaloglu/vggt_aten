@@ -209,6 +209,10 @@ class Aggregator(nn.Module):
         # attn_map shape is (B, num_heads, 1, S*P) due to our optimization
         attn_map_avg = attn_map.mean(dim=1).squeeze(1).detach().cpu().numpy() # Shape: (B, S*P)
 
+        global_min = attn_map_avg.min()
+        global_max = attn_map_avg.max()
+        global_range = global_max - global_min + 1e-8
+
         patch_h = images.shape[-2] // self.patch_size
         patch_w = images.shape[-1] // self.patch_size
         num_patch_tokens = patch_h * patch_w
@@ -244,7 +248,7 @@ class Aggregator(nn.Module):
 
                 # Overlay heatmap on the original image
                     attn_heatmap_resized = cv2.resize(attn_slice, (original_img_np.shape[1], original_img_np.shape[0]))
-                    attn_heatmap_norm = (attn_heatmap_resized - attn_heatmap_resized.min()) / (attn_heatmap_resized.max() - attn_heatmap_resized.min() + 1e-8)
+                    attn_heatmap_norm = (attn_heatmap_resized - global_min) / global_range
                     attn_heatmap_colored = (plt.cm.plasma(attn_heatmap_norm)[:, :, :3] * 255).astype(np.uint8)
                     attn_heatmap_bgr = cv2.cvtColor(attn_heatmap_colored, cv2.COLOR_RGB2BGR)
 

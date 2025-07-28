@@ -209,13 +209,23 @@ class Aggregator(nn.Module):
         # attn_map shape is (B, num_heads, 1, S*P) due to our optimization
         attn_map_avg = attn_map.mean(dim=1).squeeze(1).detach().cpu().numpy() # Shape: (B, S*P)
 
-        global_min = attn_map_avg.min()
-        global_max = attn_map_avg.max()
-        global_range = global_max - global_min + 1e-8
 
         patch_h = images.shape[-2] // self.patch_size
         patch_w = images.shape[-1] // self.patch_size
         num_patch_tokens = patch_h * patch_w
+
+
+        patch_attn_scores = []
+        for s_idx in range(S):
+            start_idx = s_idx * P + self.patch_start_idx
+            end_idx = start_idx + num_patch_tokens
+            patch_attn_scores.append(attn_map_avg[:, start_idx:end_idx])
+        patch_only_attn_map = np.concatenate(patch_attn_scores, axis=1)
+
+        # Calculate the global min and max on the relevant patch token scores only.
+        global_min = patch_only_attn_map.min()
+        global_max = patch_only_attn_map.max()
+        global_range = global_max - global_min + 1e-8
 
         for b in range(B):
             # Create a single row of S subplots

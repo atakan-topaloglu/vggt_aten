@@ -153,8 +153,6 @@ class Aggregator(nn.Module):
             if self.training:
                 warnings.warn("Attention map visualization is disabled during training.")
                 visualize_attn_maps = False
-            else:
-                os.makedirs(os.path.join(visualize_output_dir, "global"), exist_ok=True)
 
         images_normalized = (images - self._resnet_mean) / self._resnet_std
         images_normalized = images_normalized.view(B * S, C_in, H, W)
@@ -179,6 +177,7 @@ class Aggregator(nn.Module):
         _, P, C = tokens.shape
         frame_idx, global_idx = 0, 0
         output_list = []
+        final_attn_map = None
 
         for _ in range(self.aa_block_num):
             for attn_type in self.aa_order:
@@ -188,13 +187,11 @@ class Aggregator(nn.Module):
                     )
                 elif attn_type == "global":
                     should_visualize_this_layer = visualize_attn_maps and (global_idx == vis_target_layer)
-                    tokens, global_idx, global_intermediates = self._process_global_attention(
-                        tokens, B, S, P, C, global_idx, pos=pos,
-                        visualize=should_visualize_this_layer,
-                        output_dir=visualize_output_dir,
-                        images=original_images_for_viz,
-                        source_frame_idx=vis_source_frame
-                    )
+                    tokens, global_idx, global_intermediates, attn_map = self._process_global_attention(
+                        tokens, B, S, P, C, global_idx, pos=pos, visualize=should_visualize_this_layer, source_frame_idx=vis_source_frame
+                     )
+                    if should_visualize_this_layer:
+                        final_attn_map = attn_map
                 else:
                     raise ValueError(f"Unknown attention type: {attn_type}")
 
@@ -203,78 +200,11 @@ class Aggregator(nn.Module):
                 output_list.append(concat_inter)
 
         del concat_inter, frame_intermediates, global_intermediates
+        if visualize_attn_maps:
+            return output_list, self.patch_start_idx, final_attn_map
         return output_list, self.patch_start_idx
 
-    def _save_attention_map(self, attn_map: torch.Tensor, layer_idx: int, B: int, S: int, P: int, output_dir: str, images: torch.Tensor, source_frame_idx: int):
-        # attn_map shape is (B, num_heads, 1, S*P) due to our optimization
-        attn_map_avg = attn_map.mean(dim=1).squeeze(1).detach().cpu().numpy() # Shape: (B, S*P)
-
-
-        patch_h = images.shape[-2] // self.patch_size
-        patch_w = images.shape[-1] // self.patch_size
-        num_patch_tokens = patch_h * patch_w
-
-
-        patch_attn_scores = []
-        for s_idx in range(S):
-            start_idx = s_idx * P + self.patch_start_idx
-            end_idx = start_idx + num_patch_tokens
-            patch_attn_scores.append(attn_map_avg[:, start_idx:end_idx])
-        patch_only_attn_map = np.concatenate(patch_attn_scores, axis=1)
-
-        # Calculate the global min and max on the relevant patch token scores only.
-        global_min = patch_only_attn_map.min()
-        global_max = patch_only_attn_map.max()
-        global_range = global_max - global_min + 1e-8
-
-        for b in range(B):
-            # Create a single row of S subplots
-            # Calculate grid dimensions to be as square as possible
-            num_cols = int(math.ceil(math.sqrt(S)))
-            num_rows = int(math.ceil(S / num_cols))
-
-            fig, axes = plt.subplots(num_rows, num_cols, figsize=(num_cols * 4, num_rows * 4), squeeze=False)
-            fig.suptitle(f'Global Attention from Frame {source_frame_idx} - Layer {layer_idx:02d}', fontsize=16)
-
-            for i in range(num_rows * num_cols):
-                row = i // num_cols
-                col = i % num_cols
-                ax = axes[row, col]
-
-                # Slice the attention weights from the source camera to the target patches
-                if i < S:
-                    tgt_frame_idx = i
-                    # Calculate start and end indices for the patch tokens of the target frame
-                    start = tgt_frame_idx * P + self.patch_start_idx
-                    end = start + num_patch_tokens
-
-                # Get the original image for overlaying
-                    attn_slice = attn_map_avg[b, start:end].reshape(patch_h, patch_w)
-
-                # Resize and color the heatmap
-                    original_img_tensor = images[b, tgt_frame_idx]
-                    original_img_np = (original_img_tensor.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-                    original_img_bgr = cv2.cvtColor(original_img_np, cv2.COLOR_RGB2BGR)
-
-                # Overlay heatmap on the original image
-                    attn_heatmap_resized = cv2.resize(attn_slice, (original_img_np.shape[1], original_img_np.shape[0]))
-                    attn_heatmap_norm = (attn_heatmap_resized - global_min) / global_range
-                    attn_heatmap_colored = (plt.cm.plasma(attn_heatmap_norm)[:, :, :3] * 255).astype(np.uint8)
-                    attn_heatmap_bgr = cv2.cvtColor(attn_heatmap_colored, cv2.COLOR_RGB2BGR)
-
-                    overlayed_img = cv2.addWeighted(original_img_bgr, 0.2, attn_heatmap_bgr, 0.8, 0)
-                    ax.imshow(cv2.cvtColor(overlayed_img, cv2.COLOR_BGR2RGB))
-                    ax.set_title(f'To Frame {tgt_frame_idx}', fontsize=10)
-                
-                ax.axis('off')
-
-            plt.tight_layout(rect=[0, 0, 1, 0.95])
-            fpath = os.path.join(output_dir, "global", f"layer_{layer_idx:02d}_from_frame_{source_frame_idx}.png")
-            plt.savefig(fpath)
-            plt.close(fig)
-            print(f"Saved attention map to {fpath}")
-
-
+   
     def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None):
         if tokens.shape != (B * S, P, C):
             tokens = tokens.view(B, S, P, C).view(B * S, P, C)
@@ -289,13 +219,14 @@ class Aggregator(nn.Module):
             intermediates.append(tokens.view(B, S, P, C))
         return tokens, frame_idx, intermediates
 
-    def _process_global_attention(self, tokens, B, S, P, C, global_idx, pos=None, visualize=False, output_dir=None, images=None, source_frame_idx=0):
+    def _process_global_attention(self, tokens, B, S, P, C, global_idx, pos=None, visualize=False, source_frame_idx=0):
         if tokens.shape != (B, S * P, C):
             tokens = tokens.view(B, S, P, C).view(B, S * P, C)
         if pos is not None and pos.shape != (B, S * P, 2):
             pos = pos.view(B, S, P, 2).view(B, S * P, 2)
 
         intermediates = []
+        attn_map = None
         for _ in range(self.aa_block_size):
             block_input = tokens
             if visualize:
@@ -307,13 +238,12 @@ class Aggregator(nn.Module):
                     source_frame_idx=source_frame_idx,
                     num_patches_per_frame=P
                 )
-                self._save_attention_map(attn_map, global_idx, B, S, P, output_dir, images, source_frame_idx)
             else:
                 tokens = self.global_blocks[global_idx](block_input, pos=pos)
 
             global_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
-        return tokens, global_idx, intermediates
+        return tokens, global_idx, intermediates, attn_map
 
 def slice_expand_and_flatten(token_tensor, B, S):
     query = token_tensor[:, 0:1, ...].expand(B, 1, *token_tensor.shape[2:])

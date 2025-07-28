@@ -41,13 +41,17 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         if query_points is not None and len(query_points.shape) == 2:
             query_points = query_points.unsqueeze(0)
 
-        aggregated_tokens_list, patch_start_idx = self.aggregator(
-            images,
-            visualize_attn_maps=visualize_attn_maps,
-            visualize_output_dir=visualize_output_dir,
-            vis_target_layer=vis_target_layer,
-            vis_source_frame=vis_source_frame,
-        )
+        if visualize_attn_maps:
+            aggregated_tokens_list, patch_start_idx, attn_map = self.aggregator(
+                images,
+                visualize_attn_maps=True,
+                visualize_output_dir=visualize_output_dir,
+                vis_target_layer=vis_target_layer,
+                vis_source_frame=vis_source_frame,
+            )
+        else:
+            aggregated_tokens_list, patch_start_idx = self.aggregator(images, visualize_attn_maps=False)
+            attn_map = None
 
         predictions = {}
 
@@ -79,5 +83,8 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
             predictions["conf"] = conf
 
         predictions["images"] = images
+
+        if visualize_attn_maps:
+           return predictions, attn_map
 
         return predictions

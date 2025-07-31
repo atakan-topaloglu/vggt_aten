@@ -48,10 +48,14 @@ def normalize_attention_map(raw_attn_map: torch.Tensor, P: int, patch_size: int,
     # Normalize and return ONLY the patch token scores.
     return (patch_only_attn_map - global_min) / global_range
 
-def save_attention_maps(normalized_avg_patch_map: np.ndarray, B: int, S: int, patch_size: int, output_dir: str, images: torch.Tensor, source_frame_idx: int, title_prefix: str):
+def save_attention_maps(normalized_avg_patch_map: np.ndarray, B: int, S: int, patch_size: int, output_dir: str, images: torch.Tensor, source_frame_idx: int, title_prefix: str, image_names: list):
     """
     Saves a pre-normalized map of patch attentions as grayscale images and a colorized grid.
     """
+
+    attention_maps_dir = os.path.join(output_dir, "attention_maps")
+    os.makedirs(attention_maps_dir, exist_ok=True)
+    
     patch_h = images.shape[-2] // patch_size
     patch_w = images.shape[-1] // patch_size
     num_patch_tokens = patch_h * patch_w
@@ -79,7 +83,8 @@ def save_attention_maps(normalized_avg_patch_map: np.ndarray, B: int, S: int, pa
 
                 # Save grayscale map (already normalized, just scale to 255)
                 grayscale_map = (attn_slice_norm * 255).astype(np.uint8)
-                gray_fpath = os.path.join(output_dir, "global", f"{title_prefix}_from_frame_{source_frame_idx}_to_frame_{tgt_frame_idx}_gray.png")
+                target_image_name = image_names[tgt_frame_idx]
+                gray_fpath = os.path.join(attention_maps_dir, target_image_name)
                 cv2.imwrite(gray_fpath, grayscale_map)
 
                 # Create color overlay for grid
@@ -94,7 +99,7 @@ def save_attention_maps(normalized_avg_patch_map: np.ndarray, B: int, S: int, pa
             ax.axis('off')
 
         plt.tight_layout(rect=[0, 0, 1, 0.95])
-        fpath = os.path.join(output_dir, "global", f"{title_prefix}_from_frame_{source_frame_idx}_grid.png")
+        fpath = os.path.join(output_dir, f"{title_prefix}_from_frame_{source_frame_idx}_grid.png")
         plt.savefig(fpath)
         plt.close(fig)
         print(f"\nSaved colorized attention grid to {fpath}")
@@ -109,9 +114,8 @@ def main(args):
     print(f"Using device: {device} with dtype: {dtype}")
 
     # Create output directories for attention maps
-    global_attn_dir = os.path.join(args.output_dir, "global")
-    os.makedirs(global_attn_dir, exist_ok=True)
-    print(f"Global attention maps will be saved to: {global_attn_dir}")
+    os.makedirs(args.output_dir, exist_ok=True)
+    print(f"Grid attention map will be saved to: {args.output_dir}")
 
     # 2. Load VGGT Model
     print("Loading VGGT model...")
@@ -131,7 +135,8 @@ def main(args):
             raise ValueError("--num_images must be 2 or greater for global attention.")
         all_image_paths = all_image_paths[:args.num_images]
 
-    print(f"Processing {len(all_image_paths)} images: {', '.join([os.path.basename(p) for p in all_image_paths])}")
+    image_names = [os.path.basename(p) for p in all_image_paths]
+    print(f"Processing {len(all_image_paths)} images: {', '.join(image_names)}")
 
     # The entire sequence is one "batch" for global attention
     images = load_and_preprocess_images(all_image_paths, mode='pad').to(device)
@@ -174,7 +179,8 @@ def main(args):
         output_dir=args.output_dir,
         images=images,
         source_frame_idx=args.source_frame,
-        title_prefix=f"AVERAGE_L{target_layers[0]}_L{target_layers[1]}"
+        title_prefix=f"AVERAGE_L{target_layers[0]}_L{target_layers[1]}",
+        image_names=image_names
     )
 
 

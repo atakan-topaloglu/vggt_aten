@@ -53,7 +53,7 @@ def save_attention_maps(normalized_avg_patch_map: np.ndarray, B: int, S: int, pa
     Saves a pre-normalized map of patch attentions as grayscale images and a colorized grid.
     """
 
-    attention_maps_dir = os.path.join(output_dir, "attention_maps")
+    attention_maps_dir = os.path.join(output_dir)
     os.makedirs(attention_maps_dir, exist_ok=True)
     
     patch_h = images.shape[-2] // patch_size
@@ -166,7 +166,7 @@ def main(args):
     print(f"Total images: {num_images_total}. Partitioned into {num_batches} batches of size <= {max_batch_size}.")
 
     # 4. Run Inference for Target Layers and Average the Attention Maps
-    target_layers = [0, 22]
+    target_layers = [0,22]
     
     for batch_idx, batch_paths in enumerate(image_path_batches):
         batch_paths = list(batch_paths)
@@ -201,7 +201,13 @@ def main(args):
                     normalized_map = normalize_attention_map(raw_attn_map, P, patch_size, patch_start_idx, H, W)
                     normalized_maps_to_average.append(normalized_map)
 
-        avg_attn_map = np.mean(np.stack(normalized_maps_to_average, axis=0), axis=0)
+        weights = np.array([1.0, 3.0])  # Weights for layer 0 and layer 22
+        weighted_avg_attn_map = np.average(
+            np.stack(normalized_maps_to_average, axis=0),
+            axis=0,
+            weights=weights / weights.sum()
+        )
+        avg_attn_map = weighted_avg_attn_map
 
         batch_title_prefix = f"BATCH_{batch_idx+1:02d}_AVG_L{target_layers[0]}_L{target_layers[1]}"
         save_attention_maps(

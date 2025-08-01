@@ -48,7 +48,7 @@ def normalize_attention_map(raw_attn_map: torch.Tensor, P: int, patch_size: int,
     # Normalize and return ONLY the patch token scores.
     return (patch_only_attn_map - global_min) / global_range
 
-def save_attention_maps(normalized_avg_patch_map: np.ndarray, B: int, S: int, patch_size: int, output_dir: str, images: torch.Tensor, source_frame_idx: int, title_prefix: str, image_names: list):
+def save_attention_maps(normalized_avg_patch_map: np.ndarray, B: int, S: int, patch_size: int, output_dir: str, images: torch.Tensor, source_frame_idx: int, title_prefix: str, image_names: list, batch_info: tuple = None):
     """
     Saves a pre-normalized map of patch attentions as grayscale images and a colorized grid.
     """
@@ -64,7 +64,14 @@ def save_attention_maps(normalized_avg_patch_map: np.ndarray, B: int, S: int, pa
         num_cols = int(math.ceil(math.sqrt(S)))
         num_rows = int(math.ceil(S / num_cols))
         fig, axes = plt.subplots(num_rows, num_cols, figsize=(num_cols * 4, num_rows * 4), squeeze=False)
-        fig.suptitle(f'{title_prefix} from Frame {source_frame_idx}', fontsize=16)
+        source_image_name = os.path.basename(image_names[source_frame_idx])
+        if batch_info:
+            batch_idx, num_batches = batch_info
+            clean_prefix = "_".join(title_prefix.split("_")[2:])
+            title = f'Batch {batch_idx}/{num_batches} - {clean_prefix}\nSource: {source_image_name} (idx {source_frame_idx})'
+        else:
+            title = f'{title_prefix}\nSource: {source_image_name} (idx {source_frame_idx})'
+        fig.suptitle(title, fontsize=16)
 
         for i in range(num_rows * num_cols):
             row, col = i // num_cols, i % num_cols
@@ -72,6 +79,7 @@ def save_attention_maps(normalized_avg_patch_map: np.ndarray, B: int, S: int, pa
 
             if i < S:
                 tgt_frame_idx = i
+                target_image_name = os.path.basename(image_names[tgt_frame_idx])
                 # Slice the pre-normalized, patch-only map
                 start = tgt_frame_idx * num_patch_tokens
                 end = start + num_patch_tokens
@@ -94,7 +102,7 @@ def save_attention_maps(normalized_avg_patch_map: np.ndarray, B: int, S: int, pa
                 overlayed_img = cv2.addWeighted(original_img_bgr, 0.2, attn_heatmap_bgr, 0.8, 0)
 
                 ax.imshow(cv2.cvtColor(overlayed_img, cv2.COLOR_BGR2RGB))
-                ax.set_title(f'To Frame {tgt_frame_idx}', fontsize=10)
+                ax.set_title(f'To: {target_image_name}', fontsize=8)
 
             ax.axis('off')
 
@@ -129,6 +137,8 @@ def main(args):
     all_image_paths = sorted(glob.glob(os.path.join(args.image_dir, "*")))
     if not all_image_paths:
         raise FileNotFoundError(f"No images found in directory: {args.image_dir}")
+    
+    np.random.shuffle(all_image_paths)
 
     if args.num_images is not None:
         if args.num_images < 2:
@@ -144,45 +154,63 @@ def main(args):
     if images.dim() == 4:
         images = images.unsqueeze(0)
 
+    max_batch_size = 96
+    num_images_total = len(all_image_paths)
+    if num_images_total == 0:
+        print("No images to process.")
+        return
+
+    num_batches = math.ceil(num_images_total / max_batch_size)
+    image_path_batches = np.array_split(all_image_paths, num_batches)
+
+    print(f"Total images: {num_images_total}. Partitioned into {num_batches} batches of size <= {max_batch_size}.")
+
     # 4. Run Inference for Target Layers and Average the Attention Maps
     target_layers = [0, 22]
-    print(f"\nStarting visualization for Global Layers {target_layers}...")
     
-    normalized_maps_to_average = []
-    B, S, _, H, W = images.shape
-    patch_size = model.aggregator.patch_size
-    patch_start_idx = model.aggregator.patch_start_idx
-    P = (H // patch_size) * (W // patch_size) + patch_start_idx
+    for batch_idx, batch_paths in enumerate(image_path_batches):
+        batch_paths = list(batch_paths)
+        if len(batch_paths) < 2:
+            print(f"Skipping batch {batch_idx + 1} as it has fewer than 2 images.")
+            continue
 
-    for target_layer in target_layers:
-        print(f"--- Getting attention for Global Layer {target_layer:02d} ---")
-        with torch.no_grad():
-            with torch.amp.autocast(device_type=device, dtype=dtype):
-                _, raw_attn_map = model(
-                    images,
-                    visualize_attn_maps=True,
-                    vis_target_layer=target_layer,
-                    vis_source_frame=args.source_frame,
-                )
-                # Normalize this layer's map before adding it to the list for averaging
-                normalized_map = normalize_attention_map(raw_attn_map, P, patch_size, patch_start_idx, H, W)
-                normalized_maps_to_average.append(normalized_map)
+        print(f"\n--- Processing Batch {batch_idx + 1}/{num_batches} ({len(batch_paths)} images) ---")
+        image_names = [os.path.basename(p) for p in batch_paths]
 
-    # Average the collected *normalized* attention maps
-    avg_attn_map = np.mean(np.stack(normalized_maps_to_average, axis=0), axis=0)
+        images = load_and_preprocess_images(batch_paths, mode='pad').to(device)
+        if images.dim() == 4:
+            images = images.unsqueeze(0)
 
-    # 5. Save the Averaged Attention Maps
-    save_attention_maps(
-        normalized_avg_patch_map=avg_attn_map,
-        B=B, S=S,
-        patch_size=patch_size,
-        output_dir=args.output_dir,
-        images=images,
-        source_frame_idx=args.source_frame,
-        title_prefix=f"AVERAGE_L{target_layers[0]}_L{target_layers[1]}",
-        image_names=image_names
-    )
+        print(f"Starting visualization for Global Layers {target_layers}...")
+        normalized_maps_to_average = []
+        B, S, _, H, W = images.shape
+        patch_size = model.aggregator.patch_size
+        patch_start_idx = model.aggregator.patch_start_idx
+        P = (H // patch_size) * (W // patch_size) + patch_start_idx
 
+        for target_layer in target_layers:
+            print(f"--- Getting attention for Global Layer {target_layer:02d} ---")
+            with torch.no_grad():
+                with torch.amp.autocast(device_type=device, dtype=dtype):
+                    _, raw_attn_map = model(
+                        images,
+                        visualize_attn_maps=True,
+                        vis_target_layer=target_layer,
+                        vis_source_frame=args.source_frame,
+                    )
+                    normalized_map = normalize_attention_map(raw_attn_map, P, patch_size, patch_start_idx, H, W)
+                    normalized_maps_to_average.append(normalized_map)
+
+        avg_attn_map = np.mean(np.stack(normalized_maps_to_average, axis=0), axis=0)
+
+        batch_title_prefix = f"BATCH_{batch_idx+1:02d}_AVG_L{target_layers[0]}_L{target_layers[1]}"
+        save_attention_maps(
+            normalized_avg_patch_map=avg_attn_map,
+            B=B, S=S, patch_size=patch_size,
+            output_dir=args.output_dir, images=images,
+            source_frame_idx=args.source_frame, title_prefix=batch_title_prefix,
+            image_names=image_names, batch_info=(batch_idx + 1, num_batches)
+        )
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

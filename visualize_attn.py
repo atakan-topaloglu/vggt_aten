@@ -48,13 +48,17 @@ def normalize_attention_map(raw_attn_map: torch.Tensor, P: int, patch_size: int,
     # Normalize and return ONLY the patch token scores.
     return (patch_only_attn_map - global_min) / global_range
 
-def save_attention_maps(normalized_avg_patch_map: np.ndarray, B: int, S: int, patch_size: int, output_dir: str, images: torch.Tensor, source_frame_idx: int, title_prefix: str, image_names: list, batch_info: tuple = None):
+def save_attention_maps(normalized_avg_patch_map: np.ndarray, B: int, S: int, patch_size: int, output_dir: str, images: torch.Tensor, source_frame_idx: int, title_prefix: str, image_names: list, batch_info: tuple = None, save_overlay: bool = False): 
     """
     Saves a pre-normalized map of patch attentions as grayscale images and a colorized grid.
     """
 
     attention_maps_dir = os.path.join(output_dir)
     os.makedirs(attention_maps_dir, exist_ok=True)
+
+    if save_overlay:
+        overlay_dir = os.path.join(attention_maps_dir, "overlays")
+        os.makedirs(overlay_dir, exist_ok=True)
     
     patch_h = images.shape[-2] // patch_size
     patch_w = images.shape[-1] // patch_size
@@ -100,6 +104,10 @@ def save_attention_maps(normalized_avg_patch_map: np.ndarray, B: int, S: int, pa
                 attn_heatmap_colored = (plt.cm.plasma(attn_heatmap_resized)[:, :, :3] * 255).astype(np.uint8)
                 attn_heatmap_bgr = cv2.cvtColor(attn_heatmap_colored, cv2.COLOR_RGB2BGR)
                 overlayed_img = cv2.addWeighted(original_img_bgr, 0.2, attn_heatmap_bgr, 0.8, 0)
+
+                if save_overlay:
+                    overlay_fpath = os.path.join(overlay_dir, target_image_name)
+                    cv2.imwrite(overlay_fpath, overlayed_img)
 
                 ax.imshow(cv2.cvtColor(overlayed_img, cv2.COLOR_BGR2RGB))
                 ax.set_title(f'To: {target_image_name}', fontsize=8)
@@ -215,7 +223,8 @@ def main(args):
             B=B, S=S, patch_size=patch_size,
             output_dir=args.output_dir, images=images,
             source_frame_idx=args.source_frame, title_prefix=batch_title_prefix,
-            image_names=image_names, batch_info=(batch_idx + 1, num_batches)
+            image_names=image_names, batch_info=(batch_idx + 1, num_batches),
+            save_overlay=args.save_overlay
         )
 
 if __name__ == "__main__":
@@ -247,6 +256,11 @@ if __name__ == "__main__":
         default=0,
         help="The source frame index for the attention query."
     )
-
+    parser.add_argument(
+        "--save_overlay",
+        action="store_true",
+        help="Save colormapped attention maps overlaid on the input images as separate files."
+    )
+    
     args = parser.parse_args()
     main(args)
